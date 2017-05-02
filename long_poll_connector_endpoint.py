@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 import sys
 import logging
+import urllib2
+import json
 from netrc import netrc
 from threading import Thread
-from time import sleep
 from Queue import Queue, Empty
 from base64 import b64decode
 from urlparse import urlsplit
-
-import requests
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARN)
@@ -16,36 +15,25 @@ logger.setLevel(logging.WARN)
 BASE_URL = "https://api.connector.mbed.com"
 
 
-class BearerAuth(requests.auth.AuthBase):
-    """mbed Bearer auth"""
-
-    def __init__(self, app_key):
-        self.app_key = app_key
-
-    def __call__(self, request):
-        request.headers['Authorization'] = "Bearer %s" % self.app_key
-        return request
-
-
-class MbedConnectorSession(requests.Session):
-
-    def __init__(self, app_key):
-        super(MbedConnectorSession, self).__init__()
-        self.auth = BearerAuth(app_key)
+def get_opener(app_key):
+    opener = urllib2.build_opener()
+    opener.addheaders = [('Authorization', 'Bearer %s' % app_key)]
+    return opener
 
 
 def long_poll(app_key):
-    session = MbedConnectorSession(app_key)
-    session.headers.update({'connection': 'keep-alive'})
+    opener = get_opener(app_key)
+    opener.addheaders += [('connection', 'keep-alive')]
 
     response_found = False
     async_id = None
     while not response_found:
         logger.debug("async_id: %r", async_id)
         logger.debug("polling")
-        resp = session.get(BASE_URL + "/v2/notification/pull")
-        logger.debug("got long poll response: %r", resp.json())
-        async_responses = resp.json().get('async-responses', [])
+        resp = opener.open(BASE_URL + "/v2/notification/pull")
+        data = json.load(resp)
+        logger.debug("got long poll response: %r", data)
+        async_responses = data.get('async-responses', [])
         try:
             async_id = ASYNC_ID_QUEUE.get(block=False)
         except Empty:
@@ -72,14 +60,16 @@ def main(argv=None):
     ASYNC_ID_QUEUE = Queue()
     ASYNC_RESPONSE_QUEUE = Queue()
 
-    session = MbedConnectorSession(app_key)
-
+    opener = get_opener(app_key)
     long_poll_thread = Thread(target=long_poll, args=(app_key,))
     long_poll_thread.start()
+
     logger.debug("getting endpoint")
-    resp = session.get(BASE_URL + "/v2/endpoints/%s" % endpoint)
-    logger.debug("get resp: %r", resp.json())
-    async_id = resp.json()['async-response-id']
+    resp = opener.open(BASE_URL + "/v2/endpoints/%s" % endpoint)
+    data = json.load(resp)
+    logger.debug("get resp: %r", data)
+    async_id = data['async-response-id']
+
     ASYNC_ID_QUEUE.put(async_id)
     async_response = ASYNC_RESPONSE_QUEUE.get()
     long_poll_thread.join()
